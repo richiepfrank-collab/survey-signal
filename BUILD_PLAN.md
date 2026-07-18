@@ -1,5 +1,5 @@
 # Survey Signal — OpenAI Build Week Plan
-### Open-source aerial ordnance triage: drone imagery → AI-flagged candidates → human review → georeferenced hazard map
+### Open-source aerial threat-signal triage: drone imagery → AI-flagged candidates → human review → georeferenced hazard map
 
 > **2026-07-18 update:** the original YOLO/Ultralytics model path below has
 > been superseded by a local Apache-2.0 RT-DETR baseline. The historical scope,

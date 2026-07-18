@@ -1,6 +1,6 @@
 # Survey Signal
 
-**Open-source aerial ordnance triage.** Upload drone imagery → AI flags candidate surface-laid ordnance → a human analyst confirms or rejects each flag → export a georeferenced hazard map (GeoJSON/KML) and survey report for accredited demining operators.
+**Open-source aerial threat-signal triage.** Upload drone imagery → AI flags candidate surface objects → a human analyst confirms or rejects each flag → export a georeferenced hazard map (GeoJSON/KML) and survey report for accredited mine-action teams.
 
 > ⚠️ **[Read the disclaimer](DISCLAIMER.md).** Survey Signal is a survey-assist research tool. It does not detect buried mines, it does not achieve humanitarian-clearance reliability, and it must never be used to declare land safe. Humans stay in the loop by design.
 

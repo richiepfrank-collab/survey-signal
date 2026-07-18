@@ -1,7 +1,7 @@
 [project]
 name = "minemark"
 version = "0.1.0"
-description = "Open-source aerial ordnance triage: drone imagery -> AI candidates -> human review -> georeferenced hazard map"
+description = "Open-source aerial threat-signal triage: drone imagery -> AI candidates -> human review -> georeferenced hazard map"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"

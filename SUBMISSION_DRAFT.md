@@ -2,7 +2,7 @@
 
 ## Tagline
 
-Open-source, offline aerial ordnance triage for accredited mine-action teams.
+Open-source, offline aerial threat-signal triage for accredited mine-action teams.
 
 ## Problem
 

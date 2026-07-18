@@ -159,3 +159,20 @@ The `minemark` package, CLI, `MINEMARK_*` configuration, session directory,
 and export filenames deliberately remain stable. `rg` found no remaining
 reader-facing `MineMark` references. `pytest -q` passed (6 tests), and
 `ruff check backend scripts tests` passed.
+
+## Proposed terminology-alignment plan — pending approval
+
+- [x] Replace the reader-facing phrase **aerial ordnance triage** with
+  **aerial threat-signal triage** in `README.md`, `SUBMISSION_DRAFT.md`, and
+  `BUILD_PLAN.md`.
+- [x] Align the package description in `pyproject.toml` with the same wording;
+  leave the stable `minemark` package and CLI identifiers unchanged.
+- [x] Verify the obsolete reader-facing phrase is absent, run the existing
+  automated checks, and record the result below.
+
+### 2026-07-18 — Terminology-alignment review
+
+`README.md`, `SUBMISSION_DRAFT.md`, `BUILD_PLAN.md`, and `pyproject.toml` now
+use **aerial threat-signal triage**. `rg` found no remaining implementation or
+reader-facing use of the obsolete phrase outside this completed plan record.
+`pytest -q` passed (6 tests), and `ruff check backend scripts tests` passed.
