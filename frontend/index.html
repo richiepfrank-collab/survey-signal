@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Survey Signal — aerial threat-signal triage</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+  :root { --bg:#111827; --panel:#1f2937; --text:#f9fafb; --accent:#f59e0b; }
+  * { box-sizing:border-box } body { margin:0; font-family:system-ui; background:var(--bg); color:var(--text); }
+  header { padding:.6rem 1rem; background:var(--panel); display:flex; gap:1rem; align-items:center; flex-wrap:wrap }
+  header h1 { font-size:1.05rem; margin:0 } header .warn { color:var(--accent); font-size:.78rem; max-width:34rem }
+  main { display:grid; grid-template-columns: 1fr 380px; height: calc(100vh - 62px); }
+  #map { height:100% } aside { background:var(--panel); padding:1rem; overflow-y:auto }
+  button, .btn { background:#374151; color:var(--text); border:1px solid #4b5563; border-radius:6px; padding:.45rem .8rem; cursor:pointer; font-size:.85rem }
+  button:hover { background:#4b5563 } .confirm{background:#065f46}.reject{background:#7f1d1d}.unsure{background:#78350f}
+  #crop { width:100%; border-radius:8px; background:#000; min-height:160px }
+  .row { display:flex; gap:.5rem; margin:.6rem 0; flex-wrap:wrap } .muted{color:#9ca3af;font-size:.8rem}
+  #counts { font-size:.85rem } .badge{padding:.1rem .5rem;border-radius:99px;font-size:.75rem}
+  .b-confirmed{background:#065f46}.b-rejected{background:#7f1d1d}.b-unsure{background:#78350f}.b-pending{background:#374151}
+</style>
+</head>
+<body>
+<header>
+  <h1>🛩 Survey Signal</h1>
+  <input type="file" id="files" multiple accept="image/*">
+  <button id="uploadBtn" onclick="upload()">Upload &amp; detect</button>
+  <span id="counts"></span>
+  <label class="muted">Show confidence ≥ <output id="thresholdValue">0.15</output>
+    <input id="threshold" type="range" min="0.05" max="0.95" step="0.05" value="0.15"></label>
+  <span style="flex:1"></span>
+  <a class="btn" href="/api/export/geojson">GeoJSON</a>
+  <a class="btn" href="/api/export/kml">KML</a>
+  <a class="btn" href="/api/export/report" target="_blank">Report</a>
+  <div class="warn">⚠ Survey-assist only. Never treat unmarked ground as safe. Surface objects only.</div>
+</header>
+<main>
+  <div id="map"></div>
+  <aside>
+    <h3 style="margin-top:0">Review <span class="muted" id="pos"></span></h3>
+    <img id="crop" alt="detection crop">
+    <div id="meta" class="muted"></div>
+    <div class="row">
+      <button class="confirm" onclick="mark('confirmed')">✓ Confirm (y)</button>
+      <button class="reject" onclick="mark('rejected')">✗ Reject (n)</button>
+      <button class="unsure" onclick="mark('unsure')">? Unsure (u)</button>
+    </div>
+    <div class="row">
+      <button onclick="step(-1)">← Prev</button>
+      <button onclick="step(1)">Next →</button>
+    </div>
+    <p class="muted">Keyboard: <b>y</b> confirm · <b>n</b> reject · <b>u</b> unsure · <b>←/→</b> navigate.
+    Markers: amber = pending, green = confirmed, red = rejected, orange = unsure.</p>
+  </aside>
+</main>
+<script>
+const map = L.map('map').setView([20, 10], 3);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom: 22, attribution: '© OpenStreetMap'}).addTo(map);
+
+let allDets = [], dets = [], idx = -1, markers = {};
+const colors = {pending:'#f59e0b', confirmed:'#10b981', rejected:'#ef4444', unsure:'#f97316'};
+
+async function upload() {
+  const input = document.getElementById('files');
+  if (!input.files.length) return;
+  const button = document.getElementById('uploadBtn');
+  const fd = new FormData();
+  for (const f of input.files) fd.append('files', f);
+  button.disabled = true; button.textContent = 'Analyzing imagery…';
+  try {
+    const response = await fetch('/api/upload', {method:'POST', body:fd});
+    if (!response.ok) throw new Error((await response.json()).detail || 'Upload failed');
+    await refresh();
+    const pending = dets.findIndex(d => d.status === 'pending');
+    if (pending >= 0) select(pending);
+  } catch (error) {
+    document.getElementById('meta').textContent = `Upload error: ${error.message}`;
+  } finally {
+    button.disabled = false; button.textContent = 'Upload & detect';
+  }
+}
+
+async function refresh() {
+  const r = await (await fetch('/api/detections')).json();
+  allDets = r.detections.sort((a, b) => b.conf - a.conf);
+  const threshold = Number(document.getElementById('threshold').value);
+  dets = allDets.filter(d => d.conf >= threshold);
+  Object.values(markers).forEach(m => map.removeLayer(m));
+  markers = {};
+  const pts = [];
+  dets.forEach((d, i) => {
+    if (d.lat == null) return;
+    pts.push([d.lat, d.lon]);
+    markers[d.id] = L.circleMarker([d.lat, d.lon], {radius:8, color:colors[d.status], fillOpacity:.7})
+      .addTo(map).on('click', () => select(i));
+  });
+  if (pts.length) map.fitBounds(pts, {padding:[40,40]});
+  counts();
+}
+
+function counts() {
+  const c = {confirmed:0, rejected:0, unsure:0, pending:0};
+  dets.forEach(d => c[d.status]++);
+  document.getElementById('counts').innerHTML =
+    Object.entries(c).map(([k,v]) => `<span class="badge b-${k}">${k}: ${v}</span>`).join(' ');
+}
+
+function select(i) {
+  if (i < 0 || i >= dets.length) return;
+  idx = i;
+  const d = dets[idx];
+  document.getElementById('crop').src = `/api/crop/${d.id}`;
+  document.getElementById('meta').textContent =
+    `${d.label} · conf ${d.conf.toFixed(2)} · ${d.status} · ${d.image}` +
+    (d.lat != null ? ` · ${d.lat.toFixed(6)}, ${d.lon.toFixed(6)}` : ' · no GPS');
+  document.getElementById('pos').textContent = `${idx+1}/${dets.length}`;
+  if (d.lat != null) map.panTo([d.lat, d.lon]);
+}
+
+async function mark(status) {
+  if (idx < 0) return;
+  const d = dets[idx];
+  await fetch(`/api/detections/${d.id}/status/${status}`, {method:'POST'});
+  d.status = status;
+  if (markers[d.id]) markers[d.id].setStyle({color: colors[status]});
+  counts();
+  step(1);
+}
+
+function step(n) { select(Math.min(Math.max(idx + n, 0), dets.length - 1)); }
+
+document.getElementById('threshold').addEventListener('input', e => {
+  document.getElementById('thresholdValue').textContent = Number(e.target.value).toFixed(2);
+  refresh();
+});
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'y') mark('confirmed');
+  else if (e.key === 'n') mark('rejected');
+  else if (e.key === 'u') mark('unsure');
+  else if (e.key === 'ArrowRight') step(1);
+  else if (e.key === 'ArrowLeft') step(-1);
+});
+refresh();
+</script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+__pycache__/
+*.pt
+models/*
+!models/README.md
+runs/
+minemark_session/
+data/raw/
+data/yolo/
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
