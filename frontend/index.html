@@ -4,19 +4,21 @@
 <meta charset="utf-8">
 <title>Survey Signal — aerial threat-signal triage</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+<script src="/vendor/leaflet/leaflet.js"></script>
 <style>
   :root { --bg:#111827; --panel:#1f2937; --text:#f9fafb; --accent:#f59e0b; }
   * { box-sizing:border-box } body { margin:0; font-family:system-ui; background:var(--bg); color:var(--text); }
   header { padding:.6rem 1rem; background:var(--panel); display:flex; gap:1rem; align-items:center; flex-wrap:wrap }
   header h1 { font-size:1.05rem; margin:0 } header .warn { color:var(--accent); font-size:.78rem; max-width:34rem }
   main { display:grid; grid-template-columns: 1fr 380px; height: calc(100vh - 62px); }
-  #map { height:100% } aside { background:var(--panel); padding:1rem; overflow-y:auto }
+  #map { height:100%; background:#0b1220 } aside { background:var(--panel); padding:1rem; overflow-y:auto }
   button, .btn { background:#374151; color:var(--text); border:1px solid #4b5563; border-radius:6px; padding:.45rem .8rem; cursor:pointer; font-size:.85rem }
   button:hover { background:#4b5563 } .confirm{background:#065f46}.reject{background:#7f1d1d}.unsure{background:#78350f}
   #crop { width:100%; border-radius:8px; background:#000; min-height:160px }
   .row { display:flex; gap:.5rem; margin:.6rem 0; flex-wrap:wrap } .muted{color:#9ca3af;font-size:.8rem}
+  #geowarn { color:var(--accent); font-size:.8rem; margin:.4rem 0 } #geowarn:empty { display:none }
+  #analyst { background:#111827; color:var(--text); border:1px solid #4b5563; border-radius:6px; padding:.4rem .5rem; width:9rem }
   #counts { font-size:.85rem } .badge{padding:.1rem .5rem;border-radius:99px;font-size:.75rem}
   .b-confirmed{background:#065f46}.b-rejected{background:#7f1d1d}.b-unsure{background:#78350f}.b-pending{background:#374151}
 </style>
@@ -26,13 +28,14 @@
   <h1>🛩 Survey Signal</h1>
   <input type="file" id="files" multiple accept="image/*">
   <button id="uploadBtn" onclick="upload()">Upload &amp; detect</button>
+  <label class="muted">Analyst <input id="analyst" type="text" maxlength="80" placeholder="name or ID"></label>
   <span id="counts"></span>
   <label class="muted">Show confidence ≥ <output id="thresholdValue">0.15</output>
     <input id="threshold" type="range" min="0.05" max="0.95" step="0.05" value="0.15"></label>
   <span style="flex:1"></span>
   <a class="btn" href="/api/export/geojson">GeoJSON</a>
   <a class="btn" href="/api/export/kml">KML</a>
-  <a class="btn" href="/api/export/report" target="_blank">Report</a>
+  <a class="btn" id="reportLink" href="/api/export/report" target="_blank">Report</a>
   <div class="warn">⚠ Survey-assist only. Never treat unmarked ground as safe. Surface objects only.</div>
 </header>
 <main>
@@ -41,6 +44,7 @@
     <h3 style="margin-top:0">Review <span class="muted" id="pos"></span></h3>
     <img id="crop" alt="detection crop">
     <div id="meta" class="muted"></div>
+    <div id="geowarn"></div>
     <div class="row">
       <button class="confirm" onclick="mark('confirmed')">✓ Confirm (y)</button>
       <button class="reject" onclick="mark('rejected')">✗ Reject (n)</button>
@@ -52,13 +56,47 @@
     </div>
     <p class="muted">Keyboard: <b>y</b> confirm · <b>n</b> reject · <b>u</b> unsure · <b>←/→</b> navigate.
     Markers: amber = pending, green = confirmed, red = rejected, orange = unsure.</p>
+    <p class="muted">The map backdrop is your own uploaded imagery, served from this machine.
+    Decisions are saved as you make them and recorded against the analyst name above.</p>
   </aside>
 </main>
 <script>
-const map = L.map('map').setView([20, 10], 3);
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom: 22, attribution: '© OpenStreetMap'}).addTo(map);
+// No web basemap by default: the uploaded imagery is the backdrop, so the review
+// path makes no network requests. An operator can opt in with MINEMARK_BASEMAP_URL.
+const map = L.map('map', {minZoom: 1, maxZoom: 26, zoomSnap: 0.5}).setView([20, 10], 3);
+L.control.scale({imperial: false}).addTo(map);
+map.attributionControl.setPrefix(false);
 
-let allDets = [], dets = [], idx = -1, markers = {};
+let allDets = [], dets = [], idx = -1, markers = {}, images = {}, overlays = {};
+
+const analystInput = document.getElementById('analyst');
+function analyst() { return analystInput.value.trim() || 'unspecified'; }
+function syncAnalyst() {
+  document.getElementById('reportLink').href = `/api/export/report?analyst=${encodeURIComponent(analyst())}`;
+  try { localStorage.setItem('surveySignalAnalyst', analystInput.value); } catch (e) { /* storage unavailable */ }
+}
+try { analystInput.value = localStorage.getItem('surveySignalAnalyst') || ''; } catch (e) { /* storage unavailable */ }
+analystInput.addEventListener('input', syncAnalyst);
+analystInput.addEventListener('keydown', e => e.stopPropagation());  // typing a name must not trigger y/n/u
+syncAnalyst();
+
+async function loadConfig() {
+  const c = await (await fetch('/api/config')).json();
+  if (c.basemap_url) {
+    L.tileLayer(c.basemap_url, {maxNativeZoom: 19, maxZoom: 26, attribution: c.basemap_attribution}).addTo(map).bringToBack();
+  }
+}
+
+async function loadImages() {
+  const r = await (await fetch('/api/images')).json();
+  images = {};
+  for (const im of r.images) {
+    images[im.id] = im;
+    if (im.bounds && !overlays[im.id]) {
+      overlays[im.id] = L.imageOverlay(`/api/image/${im.id}/preview`, im.bounds).addTo(map);
+    }
+  }
+}
 const colors = {pending:'#f59e0b', confirmed:'#10b981', rejected:'#ef4444', unsure:'#f97316'};
 
 async function upload() {
@@ -81,7 +119,8 @@ async function upload() {
   }
 }
 
-async function refresh() {
+async function refresh(fit = true) {
+  await loadImages();
   const r = await (await fetch('/api/detections')).json();
   allDets = r.detections.sort((a, b) => b.conf - a.conf);
   const threshold = Number(document.getElementById('threshold').value);
@@ -95,7 +134,8 @@ async function refresh() {
     markers[d.id] = L.circleMarker([d.lat, d.lon], {radius:8, color:colors[d.status], fillOpacity:.7})
       .addTo(map).on('click', () => select(i));
   });
-  if (pts.length) map.fitBounds(pts, {padding:[40,40]});
+  const boxes = Object.values(images).filter(im => im.bounds).flatMap(im => im.bounds);
+  if (fit && (pts.length || boxes.length)) map.fitBounds(pts.concat(boxes), {padding:[40,40]});
   counts();
 }
 
@@ -113,7 +153,11 @@ function select(i) {
   document.getElementById('crop').src = `/api/crop/${d.id}`;
   document.getElementById('meta').textContent =
     `${d.label} · conf ${d.conf.toFixed(2)} · ${d.status} · ${d.image}` +
-    (d.lat != null ? ` · ${d.lat.toFixed(6)}, ${d.lon.toFixed(6)}` : ' · no GPS');
+    (d.lat != null ? ` · ${d.lat.toFixed(6)}, ${d.lon.toFixed(6)} (${d.position_quality || 'unknown'} position)` : ' · no GPS') +
+    (d.reviewed_by ? ` · last reviewed by ${d.reviewed_by}` : '');
+  const geo = (images[d.image_id] || {}).geo;
+  document.getElementById('geowarn').textContent =
+    geo && geo.warnings.length ? '⚠ Position check: ' + geo.warnings.join(' ') : '';
   document.getElementById('pos').textContent = `${idx+1}/${dets.length}`;
   if (d.lat != null) map.panTo([d.lat, d.lon]);
 }
@@ -121,8 +165,13 @@ function select(i) {
 async function mark(status) {
   if (idx < 0) return;
   const d = dets[idx];
-  await fetch(`/api/detections/${d.id}/status/${status}`, {method:'POST'});
-  d.status = status;
+  const response = await fetch(`/api/detections/${d.id}/status/${status}?analyst=${encodeURIComponent(analyst())}`, {method:'POST'})
+    .catch(() => ({ok: false}));
+  if (!response.ok) {
+    document.getElementById('meta').textContent = 'Decision was NOT saved — check that the server is running.';
+    return;
+  }
+  d.status = status; d.reviewed_by = analyst();
   if (markers[d.id]) markers[d.id].setStyle({color: colors[status]});
   counts();
   step(1);
@@ -132,7 +181,7 @@ function step(n) { select(Math.min(Math.max(idx + n, 0), dets.length - 1)); }
 
 document.getElementById('threshold').addEventListener('input', e => {
   document.getElementById('thresholdValue').textContent = Number(e.target.value).toFixed(2);
-  refresh();
+  refresh(false);
 });
 
 document.addEventListener('keydown', e => {
@@ -142,6 +191,7 @@ document.addEventListener('keydown', e => {
   else if (e.key === 'ArrowRight') step(1);
   else if (e.key === 'ArrowLeft') step(-1);
 });
+loadConfig().catch(() => {});
 refresh();
 </script>
 </body>

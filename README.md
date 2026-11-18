@@ -27,7 +27,7 @@ Drone RGB imagery + AI detects ~95% of surface-laid ordnance in peer-reviewed fi
 ## Quickstart
 
 ```bash
-git clone https://github.com/YOURUSER/minemark && cd minemark
+git clone https://github.com/richiepfrank-collab/survey-signal && cd survey-signal
 pip install -e .
 MINEMARK_MODEL=/absolute/path/to/local-model-directory minemark serve
 ```
@@ -43,6 +43,36 @@ pip install -e ".[geotiff]"
 python scripts/stage_model.py --repo PekingU/rtdetr_r18vd --out models/rtdetr-r18vd
 MINEMARK_MODEL=models/rtdetr-r18vd minemark serve
 ```
+
+## Positions, sessions, and offline use
+
+**Marker positions.** GeoTIFF orthomosaics are positioned exactly from their transform. For
+single GPS-tagged photos, Survey Signal estimates the ground footprint and records where each
+input came from:
+
+| Input | Preferred source | Fallback (flagged as *unverified*) |
+|---|---|---|
+| Height above ground | `MINEMARK_AGL_M`, then DJI XMP `RelativeAltitude` | EXIF GPS altitude, which is height above **sea level** |
+| Camera heading | XMP gimbal/flight yaw, then EXIF `GPSImgDirection` | assumed north-up |
+| Lens field of view | EXIF 35 mm-equivalent focal length | assumed 13.2 mm sensor width |
+
+If your imagery has no relative altitude, set the flight height yourself, for example
+`MINEMARK_AGL_M=40 minemark serve`. Every detection carries a `position_quality` of
+`georeferenced`, `approximate`, or `unverified` in the UI, GeoJSON, KML, and report, and the
+report lists the reason for each unverified image. `RelativeAltitude` is height above the
+take-off point, so sloping ground still shifts markers.
+
+**Sessions and audit trail.** Imagery, detections, and review decisions are stored in
+`minemark_session/session.sqlite3` and survive a restart. Every confirm/reject/unsure is
+appended to a review log with the analyst name entered in the header and a UTC timestamp
+(`GET /api/audit`). Use `MINEMARK_SESSION=/path/to/survey-042` to keep surveys separate; back
+up or archive that directory to preserve a survey.
+
+**Offline review.** Leaflet is vendored in `frontend/vendor/leaflet/`, and the map backdrop is
+your own uploaded imagery rendered locally, so the review UI makes no external requests. To
+add a tile basemap on a connected machine, opt in with
+`MINEMARK_BASEMAP_URL='https://tile.example.org/{z}/{x}/{y}.png'` (and
+`MINEMARK_BASEMAP_ATTRIBUTION`); check the tile provider's usage terms first.
 
 ## Judge setup and testing
 
@@ -62,13 +92,14 @@ requirements, licenses, and video constraints.
 
 ```
 images ─► bounded overlapping tiles ─► local RT-DETR detector ─► seam-aware NMS
-        ─► pixel→WGS84 georeferencing (EXIF GPS / GeoTIFF CRS)
+        ─► pixel→WGS84 georeferencing (EXIF GPS + flight geometry / GeoTIFF CRS)
+        ─► SQLite session store + review audit log
         ─► human review UI (Leaflet + crop viewer)
         ─► exports: GeoJSON · KML · HTML survey report
 ```
 
 - `backend/` — FastAPI app, detection pipeline, georeferencing, exports
-- `frontend/` — single-file Leaflet review UI (no build step; vendor Leaflet for fully air-gapped deployments)
+- `frontend/` — single-file review UI with vendored Leaflet 1.9.4 (BSD-2-Clause; no build step, no CDN)
 - `scripts/` — model staging and dataset-label conversion
 - `data/` — open dataset sources ([data/README.md](data/README.md))
 

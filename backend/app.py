@@ -1,39 +1,70 @@
 """Survey Signal FastAPI backend.
 
-In-memory session store (hackathon MVP): one global project, detections keyed
-by id. State is lost on restart — export early, export often.
+Session state (imagery metadata, detections, and the review audit log) lives
+in a SQLite file inside the session directory, so review work survives a
+restart. Set ``MINEMARK_SESSION`` to keep separate surveys in separate
+directories.
 """
 from __future__ import annotations
 
+import hashlib
 import io
-import shutil
+import os
 import uuid
 from dataclasses import asdict
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
 from . import detector, exports, georef, imageio
+from .store import STATUSES, Store
 
 app = FastAPI(title="Survey Signal", version="0.1.0")
 
-DATA_DIR = Path("minemark_session")
-IMG_DIR = DATA_DIR / "images"
-IMG_DIR.mkdir(parents=True, exist_ok=True)
+FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
+FRONTEND = FRONTEND_DIR / "index.html"
+app.mount("/vendor", StaticFiles(directory=FRONTEND_DIR / "vendor"), name="vendor")
 
-STATE: dict = {"images": {}, "detections": {}}  # image_id -> meta ; det_id -> det dict
-FRONTEND = Path(__file__).parent.parent / "frontend" / "index.html"
+DATA_DIR: Path
+IMG_DIR: Path
+PREVIEW_DIR: Path
+STORE: Store
+
+
+def configure(session_dir: str | Path) -> None:
+    """Point the app at a session directory, creating it if needed."""
+    global DATA_DIR, IMG_DIR, PREVIEW_DIR, STORE
+    DATA_DIR = Path(session_dir)
+    IMG_DIR = DATA_DIR / "images"
+    PREVIEW_DIR = DATA_DIR / "previews"
+    IMG_DIR.mkdir(parents=True, exist_ok=True)
+    PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+    STORE = Store(DATA_DIR / "session.sqlite3")
+
+
+configure(os.environ.get("MINEMARK_SESSION", "minemark_session"))
 
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return FRONTEND.read_text()
+    return FRONTEND.read_text(encoding="utf-8")
+
+
+@app.get("/api/config")
+def config():
+    """Runtime options for the review UI. The basemap is off unless an operator opts in."""
+    return {
+        "model": detector.MODEL_PATH,
+        "basemap_url": os.environ.get("MINEMARK_BASEMAP_URL") or None,
+        "basemap_attribution": os.environ.get("MINEMARK_BASEMAP_ATTRIBUTION", ""),
+    }
 
 
 @app.post("/api/upload")
-async def upload(files: list[UploadFile] = File(...)):
+async def upload(files: list[UploadFile] = File(...)):  # noqa: B008 - FastAPI idiom
     """Store supported imagery and add its AI proposals to the review queue."""
     if not files:
         raise HTTPException(status_code=400, detail="Select at least one image.")
@@ -52,45 +83,64 @@ async def upload(files: list[UploadFile] = File(...)):
             )
         image_id = uuid.uuid4().hex[:8]
         dest = IMG_DIR / f"{image_id}_{filename}"
+        digest = hashlib.sha256()
         with dest.open("wb") as out:
-            shutil.copyfileobj(f.file, out)
+            while chunk := f.file.read(1 << 20):
+                digest.update(chunk)
+                out.write(chunk)
 
-        geo = georef.extract_geo(str(dest))
-        dets = detector.detect_image(str(dest))
-        for d in dets:
+        try:
+            geo = georef.extract_geo(str(dest))
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        rows = []
+        for d in detector.detect_image(str(dest)):
             d.id = uuid.uuid4().hex[:8]
             if geo:
                 d.lon, d.lat = geo.pixel_to_lonlat(d.cx, d.cy)
-            STATE["detections"][d.id] = {**asdict(d), "image": dest.name, "image_id": image_id}
+            rows.append({**asdict(d), "image": dest.name, "image_id": image_id,
+                         "position_quality": geo.quality if geo else None})
 
-        STATE["images"][image_id] = {
-            "id": image_id, "file": dest.name, "n_detections": len(dets),
+        results.append(STORE.add_image({
+            "id": image_id, "file": dest.name, "sha256": digest.hexdigest(),
+            "model": detector.MODEL_PATH,
             "lat": geo.lat if geo else None, "lon": geo.lon if geo else None,
             "gsd_m": geo.gsd_m if geo else None,
-        }
-        results.append(STATE["images"][image_id])
-    return {"images": results, "total_detections": len(STATE["detections"])}
+            "geo": geo.describe() if geo else None,
+            "bounds": georef.footprint_bounds(geo) if geo else None,
+        }, rows))
+    return {"images": results, "total_detections": len(STORE.detections())}
+
+
+@app.get("/api/images")
+def images():
+    return {"images": STORE.images()}
 
 
 @app.get("/api/detections")
 def detections():
-    return {"detections": list(STATE["detections"].values()),
-            "model": detector.MODEL_PATH}
+    return {"detections": STORE.detections(), "model": detector.MODEL_PATH}
 
 
 @app.post("/api/detections/{det_id}/status/{status}")
-def set_status(det_id: str, status: str):
-    if status not in ("confirmed", "rejected", "unsure", "pending"):
+def set_status(det_id: str, status: str, analyst: str = "unspecified"):
+    if status not in STATUSES:
         return JSONResponse({"error": "bad status"}, status_code=400)
-    if det_id not in STATE["detections"]:
+    updated = STORE.set_status(det_id, status, analyst)
+    if updated is None:
         return JSONResponse({"error": "not found"}, status_code=404)
-    STATE["detections"][det_id]["status"] = status
-    return STATE["detections"][det_id]
+    return updated
+
+
+@app.get("/api/audit")
+def audit():
+    """Every review decision in the order it was made."""
+    return {"review_log": STORE.review_log()}
 
 
 @app.get("/api/crop/{det_id}")
 def crop(det_id: str, pad: int = 64):
-    d = STATE["detections"].get(det_id)
+    d = STORE.detection(det_id)
     if not d:
         return JSONResponse({"error": "not found"}, status_code=404)
     x1, y1 = max(0, int(d["x1"]) - pad), max(0, int(d["y1"]) - pad)
@@ -105,7 +155,7 @@ def crop(det_id: str, pad: int = 64):
 @app.get("/api/export/geojson")
 def export_geojson(include_unsure: bool = False):
     statuses = ("confirmed", "unsure") if include_unsure else ("confirmed",)
-    gj = exports.to_geojson(list(STATE["detections"].values()), statuses)
+    gj = exports.to_geojson(STORE.detections(), statuses)
     return Response(exports.dumps(gj), media_type="application/geo+json",
                     headers={"Content-Disposition": "attachment; filename=minemark_hazards.geojson"})
 
@@ -113,21 +163,37 @@ def export_geojson(include_unsure: bool = False):
 @app.get("/api/export/kml")
 def export_kml(include_unsure: bool = False):
     statuses = ("confirmed", "unsure") if include_unsure else ("confirmed",)
-    kml = exports.to_kml(list(STATE["detections"].values()), statuses)
+    kml = exports.to_kml(STORE.detections(), statuses)
     return Response(kml, media_type="application/vnd.google-earth.kml+xml",
                     headers={"Content-Disposition": "attachment; filename=minemark_hazards.kml"})
 
 
 @app.get("/api/export/report")
 def export_report(analyst: str = "unspecified"):
-    html = exports.to_report_html(list(STATE["detections"].values()),
-                                  detector.MODEL_PATH, len(STATE["images"]), analyst)
+    html = exports.to_report_html(STORE.detections(), detector.MODEL_PATH, len(STORE.images()),
+                                  analyst, images=STORE.images())
     return HTMLResponse(html)
 
 
 @app.get("/api/image/{image_id}")
 def image(image_id: str):
-    meta = STATE["images"].get(image_id)
+    meta = STORE.image(image_id)
     if not meta:
         return JSONResponse({"error": "not found"}, status_code=404)
     return FileResponse(IMG_DIR / meta["file"])
+
+
+@app.get("/api/image/{image_id}/preview")
+def image_preview(image_id: str):
+    """North-up overview of an image, drawn under the markers in place of a web basemap."""
+    meta = STORE.image(image_id)
+    if not meta:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    cached = PREVIEW_DIR / f"{image_id}.png"
+    if not cached.exists():
+        yaw = (meta["geo"] or {}).get("yaw_deg") or 0.0
+        preview = imageio.render_preview(str(IMG_DIR / meta["file"]), rotate_cw_deg=yaw)
+        partial = cached.with_suffix(".partial")
+        preview.save(partial, format="PNG")
+        partial.replace(cached)
+    return FileResponse(cached, media_type="image/png")
