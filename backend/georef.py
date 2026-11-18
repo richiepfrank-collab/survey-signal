@@ -23,6 +23,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import struct
 from dataclasses import dataclass, field
 
 import piexif
@@ -183,8 +184,8 @@ def extract_geo(image_path: str) -> ImageGeo | GeoTiffGeo | None:
         w, h = img.size
     try:
         exif = piexif.load(image_path)
-    except Exception:
-        return None
+    except (piexif.InvalidImageDataError, ValueError, KeyError, IndexError, struct.error, OSError):
+        return None  # not a JPEG/TIFF, or unreadable EXIF: treat as an image with no GPS
     gps = exif.get("GPS") or {}
     if piexif.GPSIFD.GPSLatitude not in gps or piexif.GPSIFD.GPSLongitude not in gps:
         return None

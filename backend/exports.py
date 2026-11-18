@@ -99,7 +99,9 @@ heading {{ i.geo.yaw_deg }}° ({{ i.geo.yaw_source }}); scale from {{ i.geo.gsd_
 
 def to_report_html(detections: list[dict], model_name: str, n_images: int,
                    analyst: str = "unspecified", images: list[dict] | None = None) -> str:
-    by = lambda s: [d for d in detections if d["status"] == s]  # noqa: E731
+    def by(status: str) -> list[dict]:
+        return [d for d in detections if d["status"] == status]
+
     rows = [d for d in detections if d["status"] in ("confirmed", "unsure")]
     return _REPORT.render(
         disclaimer=DISCLAIMER,

@@ -64,7 +64,7 @@ def config():
 
 
 @app.post("/api/upload")
-async def upload(files: list[UploadFile] = File(...)):
+async def upload(files: list[UploadFile] = File(...)):  # noqa: B008 - FastAPI idiom
     """Store supported imagery and add its AI proposals to the review queue."""
     if not files:
         raise HTTPException(status_code=400, detail="Select at least one image.")
