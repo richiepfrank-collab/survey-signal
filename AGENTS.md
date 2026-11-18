@@ -17,11 +17,12 @@ ruff check backend scripts tests
 
 ## Architecture
 
-- `backend/app.py` — FastAPI routes; in-memory STATE (images + detections). Frontend served at `/`.
+- `backend/app.py` — FastAPI routes. Frontend served at `/`, vendored assets at `/vendor`.
+- `backend/store.py` — SQLite session store (`MINEMARK_SESSION`, default `minemark_session/`): images, detections, append-only `review_log`. All state goes through it; do not add in-memory state.
 - `backend/detector.py` — tiled inference (TILE=1024, OVERLAP=128), cross-seam NMS. Model selected by `MINEMARK_MODEL`, which must be a fully staged local RT-DETR model directory; no runtime downloads.
-- `backend/georef.py` — EXIF GPS → per-pixel WGS84 (nadir, north-up approximation; meters-level accuracy is acceptable and documented).
+- `backend/georef.py` — EXIF GPS → per-pixel WGS84 using height above ground (`MINEMARK_AGL_M` / XMP `RelativeAltitude`), camera yaw, and 35 mm-equivalent focal length. Any assumed input adds a warning and marks positions `unverified`; never silently fall back. GeoTIFFs use their affine transform.
 - `backend/exports.py` — GeoJSON/KML (KML is hand-rolled XML; do not re-add simplekml) + Jinja2 HTML report. `DISCLAIMER` constant goes into every export.
-- `frontend/index.html` — single file, Leaflet from cdnjs, no build step. Keep it that way.
+- `frontend/index.html` — single file, no build step; Leaflet is vendored under `frontend/vendor/leaflet/`. No external URLs in `src`/`href` (a test enforces this). The backdrop is the uploaded imagery via `/api/image/{id}/preview`; a tile basemap is opt-in through `MINEMARK_BASEMAP_URL`.
 - `scripts/prepare_labels.py` — dataset-label adapters (COCO done; add loaders only after inspecting released annotation artifacts).
 - `scripts/train.py` — explicit training gate until usable DRC ground truth is available.
 
@@ -29,7 +30,7 @@ ruff check backend scripts tests
 
 1. **Never weaken the disclaimer.** Every export and the UI header must state: survey-assist only, surface objects only, never declares land safe. A missing marker means nothing.
 2. Exports default to **confirmed-only** detections (`include_unsure` opt-in). Never export pending/rejected as hazards.
-3. **Offline-capable at runtime**: no network calls in the detection/review/export path. CDN assets in the frontend are acceptable for the hackathon but an offline-vendored variant is welcome.
+3. **Offline-capable at runtime**: no network calls in the detection/review/export path, including the frontend.
 4. **Honest metrics**: held-out evaluation must come from a different flight/site than training; report failure cases alongside successes.
 
 ## Priorities (from BUILD_PLAN.md)

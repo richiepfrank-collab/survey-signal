@@ -176,3 +176,38 @@ reader-facing `MineMark` references. `pytest -q` passed (6 tests), and
 use **aerial threat-signal triage**. `rg` found no remaining implementation or
 reader-facing use of the obsolete phrase outside this completed plan record.
 `pytest -q` passed (6 tests), and `ruff check backend scripts tests` passed.
+
+## Post-Build-Week hardening plan — approved by owner 2026-11-17
+
+Goal: fix the three defects that made exported positions and review records
+untrustworthy, without touching the detector or the disclaimer.
+
+- [x] **Georeferencing.** Stop treating EXIF GPS altitude (above sea level) as
+  height above ground; read XMP relative altitude and yaw; derive GSD from the
+  35 mm-equivalent focal length; flag every assumed input.
+- [x] **Persistence and audit.** Replace in-memory `STATE` with a SQLite session
+  store and an append-only review log (analyst + UTC timestamp).
+- [x] **Offline map.** Vendor Leaflet, remove the CDN and OpenStreetMap tile
+  requests, and draw the uploaded imagery as the map backdrop.
+
+### 2026-11-17 — review
+
+- `backend/georef.py`: altitude source order is `MINEMARK_AGL_M` → XMP
+  `RelativeAltitude` → EXIF GPS altitude (flagged) → 60 m default (flagged).
+  Yaw rotates pixel offsets. Each image stores its input sources and warnings;
+  detections carry `position_quality`, which appears in the UI and all exports.
+- `backend/store.py`: `session.sqlite3` in the session directory; uploads are
+  hashed (SHA-256) and recorded with the model path used.
+- `frontend/`: Leaflet 1.9.4 vendored; north-up imagery previews served from
+  `/api/image/{id}/preview`; tile basemap is opt-in only.
+- The HTML report template now autoescapes, because analyst names and file
+  names are user-supplied.
+- Verification: `pytest -q` 16 passed (rasterio installed). A headless-Chrome
+  run against a stand-in detector uploaded a yawed frame, reviewed two
+  candidates, and made 15 requests, all to localhost; decisions and reviewer
+  names were intact after a server restart.
+- Not verified: real DJI imagery (tests use synthetic EXIF/XMP), and preview
+  render time on the 312 MP DRC orthomosaic, which has no stored overviews.
+- Known limits: flat-ground nadir model; `RelativeAltitude` is relative to the
+  take-off point; previews of rotated or projected GeoTIFFs are placed by
+  bounding box.
